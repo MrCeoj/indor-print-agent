@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -23,10 +24,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/thr1vefitstudio/print-agent/internal/config"
+	"github.com/thr1vefitstudio/print-agent/internal/console"
 	"github.com/thr1vefitstudio/print-agent/internal/httpapi"
 	"github.com/thr1vefitstudio/print-agent/internal/service"
 	"github.com/thr1vefitstudio/print-agent/internal/spooler"
@@ -86,9 +89,23 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		fail(err)
 	}
+}
+
+// fail prints an error and, when this window is about to vanish with it, waits.
+//
+// Without the pause a double-clicked binary reports every problem the same way:
+// a console that appears and is gone before it can be read. The pause is the
+// difference between "it does not work" and "Access is denied reading
+// config.json", which are not the same bug report.
+func fail(err error) {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	if console.StartedFromExplorer() {
+		fmt.Fprintln(os.Stderr, "\nPress Enter to close this window.")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	os.Exit(1)
 }
 
 func usage() {
@@ -161,6 +178,17 @@ func serve() (stop func(context.Context) error, addr string, err error) {
 	case err := <-ready:
 		if err != nil {
 			_ = closer.Close()
+			if inUse(err) {
+				// Overwhelmingly the ordinary case: the service is already
+				// running and someone double-clicked the binary as well. That
+				// is not a fault to debug, so it does not read like one.
+				return nil, "", fmt.Errorf(
+					"something is already listening on %s.\n\n"+
+						"If the %s service is running, this is expected - it is already doing the job,\n"+
+						"and there is no need to start the agent by hand. Check with:\n\n"+
+						"    sc query %s",
+					srv.Addr(), config.ServiceName, config.ServiceName)
+			}
 			return nil, "", fmt.Errorf("listening on %s: %w", srv.Addr(), err)
 		}
 	case <-time.After(250 * time.Millisecond):
@@ -299,6 +327,18 @@ func printStatus() error {
 		fmt.Printf("printer        %s [%s]%s\n", p.Name, p.Status, def)
 	}
 	return nil
+}
+
+// inUse recognises a taken port across platforms. Windows raises
+// WSAEADDRINUSE (10048) rather than the EADDRINUSE Go names, so the message is
+// checked too - a wrong guess here only costs a less specific error.
+func inUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "address already in use") ||
+		strings.Contains(text, "only one usage of each socket address")
 }
 
 func present(s string) string {

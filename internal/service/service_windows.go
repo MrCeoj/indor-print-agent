@@ -7,11 +7,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// report writes to the Windows Application log.
+//
+// A service that fails to start has nowhere else to speak. Its stdout goes to
+// no console, and the file log is itself one of the things that can be
+// unreachable - a permissions mistake on ProgramData takes out the log and the
+// config together, which is exactly the failure that most needs explaining.
+// Best-effort throughout: if the source was never registered, the message is
+// lost and the service still behaves correctly.
+func report(level uint16, message string) {
+	log, err := eventlog.Open(Name)
+	if err != nil {
+		return
+	}
+	defer log.Close()
+
+	switch level {
+	case eventlog.Error:
+		_ = log.Error(1, message)
+	case eventlog.Warning:
+		_ = log.Warning(1, message)
+	default:
+		_ = log.Info(1, message)
+	}
+}
 
 // IsService reports whether this process was started by the service control
 // manager rather than a person at a prompt.
@@ -32,10 +59,12 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 
 	status <- svc.Status{State: svc.StartPending}
 	if err := h.work.Start(); err != nil {
+		report(eventlog.Error, fmt.Sprintf("%s failed to start: %v", Name, err))
 		status <- svc.Status{State: svc.Stopped}
 		// A non-zero exit code is what makes the SCM's restart policy fire.
 		return false, 1
 	}
+	report(eventlog.Info, fmt.Sprintf("%s started", Name))
 	status <- svc.Status{State: svc.Running, Accepts: accepted}
 
 	for c := range req {
@@ -100,6 +129,14 @@ func Install() error {
 	}
 	defer s.Close()
 
+	// Register the event source, so the handler above has somewhere to write.
+	// An existing registration is not an error - reinstalling is routine.
+	if err := eventlog.InstallAsEventCreate(
+		Name, eventlog.Error|eventlog.Warning|eventlog.Info,
+	); err != nil && !strings.Contains(err.Error(), "already exists") {
+		fmt.Fprintf(os.Stderr, "warning: could not register the event source: %v\n", err)
+	}
+
 	// Restart forever, backing off. A print agent that stays down after one
 	// crash is a counter that cannot take money until someone notices.
 	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
@@ -136,6 +173,7 @@ func Uninstall() error {
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("deleting %s: %w", Name, err)
 	}
+	_ = eventlog.Remove(Name)
 	return nil
 }
 

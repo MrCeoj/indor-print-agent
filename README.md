@@ -53,6 +53,68 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Mode LogonTask
 That runs the same binary in the cashier's own session at logon. It needs the
 terminal to log in automatically, which a till normally does.
 
+## Troubleshooting
+
+### The exe opens a window that closes instantly
+
+It hit a startup error and exited. Since 1.0.1 the window stays open and waits
+for Enter when it was double-clicked, so the error is readable. On an older
+build, run it from a prompt that already exists instead — the window is then the
+shell's and survives:
+
+```powershell
+& 'C:\Program Files\Thr1vePrint\thr1ve-print-agent.exe' status
+```
+
+The most common cause is not a fault at all: **the service is already running
+and holding port 9101**, so a second copy cannot bind. That is the healthy
+state. `sc query Thr1vePrint` will say `RUNNING`.
+
+### The service installs without complaint but nothing answers on 9101
+
+Check, in this order:
+
+```powershell
+sc query Thr1vePrint
+& 'C:\Program Files\Thr1vePrint\thr1ve-print-agent.exe' status
+Get-Content C:\ProgramData\Thr1vePrint\agent.log -Tail 40
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Thr1vePrint'} -MaxEvents 20 |
+  Format-List TimeCreated, LevelDisplayName, Message
+```
+
+**If `status` reports `Access is denied` reading `config.json`**, the data
+directory's permissions are broken and every path fails at once — the service
+cannot start, the binary cannot run by hand, and `/caja` reports no agent.
+Installers before 1.0.1 caused this on any non-English Windows: they granted
+rights to the account names `Administrators` and `SYSTEM`, which a Spanish
+install calls `Administradores` and `SISTEMA`. icacls refused the names it could
+not map, but inheritance had already been stripped, leaving a folder readable by
+nobody. Recover by deleting the folder and reinstalling:
+
+```powershell
+sc stop Thr1vePrint
+Remove-Item -Recurse -Force C:\ProgramData\Thr1vePrint
+.\install.ps1
+```
+
+That mints a **new token**, so paste the new one into `/caja`.
+
+### `agent status` lists no printers
+
+See "If `agent status` reports no printers" under Install — that is the session 0
+case, and `-Mode LogonTask` is the answer.
+
+### /caja says "Sin agente en esta terminal" but the agent is running
+
+The agent is up and the browser cannot reach it. Either the origin is not on the
+allowlist (`allowedOrigins` in `C:\ProgramData\Thr1vePrint\config.json` — the
+panel says so explicitly when that is the cause) or the browser is blocking
+loopback. Test the second directly, in DevTools on the page that is failing:
+
+```js
+await (await fetch('http://127.0.0.1:9101/v1/health')).json();
+```
+
 ## Commands
 
 |                        |                                                                        |

@@ -106,8 +106,33 @@ Write-Host "Installed $targetExe"
 # The data directory holds the token. Administrators and SYSTEM only: a cashier
 # account has no reason to read it, and the ACL is the only thing that stops a
 # curious user copying a credential off the counter.
+#
+# **Well-known SIDs, never account names.** `Administrators` and `SYSTEM` are the
+# ENGLISH names; a Spanish install calls them `Administradores` and `SISTEMA`, and
+# icacls refuses a name it cannot map. That mattered far more than it looks: the
+# original line stripped inheritance and granted in one call, so on a localised
+# Windows the strip succeeded, the grant failed, and the folder was left readable
+# by nobody at all - which the service then reported as an unexplained failure to
+# start, because `config.json` had become unreadable to LocalSystem itself.
+#
+# S-1-5-32-544 is the Administrators group, S-1-5-18 is Local System. Neither is
+# translated in any locale.
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-& icacls $DataDir /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' | Out-Null
+
+& icacls $DataDir /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  # Do NOT strip inheritance after a failed grant - that is what locks everyone
+  # out. An inherited ACL is less private than intended but entirely functional,
+  # and the agent still runs.
+  Write-Warning "Could not set permissions on $DataDir (icacls exit $LASTEXITCODE)."
+  Write-Warning 'Continuing with inherited permissions. The token file is readable by any local administrator.'
+}
+else {
+  & icacls $DataDir /inheritance:r | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Could not remove inherited permissions from $DataDir (icacls exit $LASTEXITCODE)."
+  }
+}
 
 if ($Mode -eq 'Service') {
   # Remove a previous registration rather than trying to reconfigure it: the

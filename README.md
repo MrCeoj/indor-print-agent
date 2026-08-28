@@ -53,6 +53,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Mode LogonTask
 That runs the same binary in the cashier's own session at logon. It needs the
 terminal to log in automatically, which a till normally does.
 
+One consequence worth knowing: in this mode the agent runs as the cashier, so
+the installer also grants the **Users** group read access to
+`C:\ProgramData\Thr1vePrint`. Without it the agent cannot read its own config
+and will not start. The token is therefore readable by anyone who can log into
+that terminal — acceptable, since it authorizes printing on that machine and the
+person logged into it is the one doing the printing, but it is a genuine step
+down from Service mode and should not be the default.
+
 ## Troubleshooting
 
 ### The exe opens a window that closes instantly
@@ -98,6 +106,17 @@ Remove-Item -Recurse -Force C:\ProgramData\Thr1vePrint
 ```
 
 That mints a **new token**, so paste the new one into `/caja`.
+
+### install.ps1 stops at "El sistema no puede encontrar el archivo especificado"
+
+Fixed in the current script. Windows PowerShell turns **any** stderr output from
+a native command into a terminating error when `$ErrorActionPreference` is
+`Stop`, and `2>$null` does not reliably suppress it. `schtasks /End` on a
+terminal that has no such task — the normal case on a first install — reports
+exactly that on stderr, so the installer died at its own cleanup step before
+copying anything. The script now uses `Get-ScheduledTask` / `Get-Service`
+cmdlets for those checks, and routes the two remaining native programs through
+a wrapper that merges stderr and judges the exit code instead.
 
 ### `agent status` lists no printers
 

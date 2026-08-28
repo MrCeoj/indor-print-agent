@@ -34,16 +34,38 @@ param(
   [ValidateSet('Service', 'LogonTask')]
   [string]$Mode = 'Service',
 
-  [string]$Source = $PSScriptRoot
+  # Resolved below rather than defaulted to $PSScriptRoot here. That variable is
+  # empty whenever the script is not being run as a file - pasted into the
+  # console, dot-sourced, piped through iex - and an empty default turns the
+  # first Join-Path into "Cannot bind argument to parameter 'Path' because it is
+  # an empty string", which says nothing about what actually went wrong.
+  [string]$Source = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 $ServiceName = 'Thr1vePrint'
 $ExeName     = 'thr1ve-print-agent.exe'
-$InstallDir  = Join-Path $env:ProgramFiles 'Thr1vePrint'
-$DataDir     = Join-Path $env:ProgramData  'Thr1vePrint'
 $TaskName    = 'Thr1vePrintAgent'
+
+function Resolve-SourceDir {
+  param([string]$Given)
+
+  if ($Given) { return $Given }
+  if ($PSScriptRoot) { return $PSScriptRoot }
+  if ($MyInvocation.ScriptName) { return (Split-Path -Parent $MyInvocation.ScriptName) }
+  # Last resort: wherever the prompt is. Correct when someone cd'd into the
+  # unzipped folder first, which is the usual way this gets run by hand.
+  return (Get-Location).Path
+}
+
+# ProgramFiles and ProgramData are all but guaranteed, but an empty one here
+# would fail the same opaque way, so they get the same treatment.
+$ProgramFilesDir = if ($env:ProgramFiles) { $env:ProgramFiles } else { 'C:\Program Files' }
+$ProgramDataDir  = if ($env:ProgramData)  { $env:ProgramData }  else { 'C:\ProgramData' }
+
+$InstallDir = Join-Path $ProgramFilesDir 'Thr1vePrint'
+$DataDir    = Join-Path $ProgramDataDir  'Thr1vePrint'
 
 function Assert-Admin {
   $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -55,9 +77,18 @@ function Assert-Admin {
 
 Assert-Admin
 
+$Source = Resolve-SourceDir -Given $Source
+Write-Host "Source folder: $Source"
+
 $sourceExe = Join-Path $Source $ExeName
 if (-not (Test-Path $sourceExe)) {
-  throw "$ExeName not found in $Source. Unzip the release first."
+  throw @"
+$ExeName not found in:
+  $Source
+
+Unzip the release and run this from that folder, or point at it explicitly:
+  .\install.ps1 -Source C:\path\to\unzipped
+"@
 }
 
 # Stop whatever is already running, so the copy below is not blocked by a file

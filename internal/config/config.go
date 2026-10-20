@@ -40,6 +40,27 @@ type Config struct {
 
 	// LogPath is where the log goes. Empty means alongside the config.
 	LogPath string `json:"logPath,omitempty"`
+
+	// Relay, when set, makes this agent a print station: it also polls the
+	// server for jobs queued by devices that have no agent of their own (a
+	// waiter's tablet). Written by `agent pair`. Absent in every config from
+	// before 1.1.0, which simply means the relay is off.
+	Relay *Relay `json:"relay,omitempty"`
+}
+
+// Relay is the station's link to the app.
+type Relay struct {
+	// ServerURL is the app's origin, e.g. https://pos.example.com. HTTPS
+	// except for a loopback dev server.
+	ServerURL string `json:"serverUrl"`
+
+	// Token is the station credential the server issued at pairing,
+	// `<station id>.<secret>`. Unlike Token above it IS a server credential:
+	// it lets whoever holds it take this venue's print jobs. Never logged.
+	Token string `json:"token"`
+
+	// StationName is for `agent status` only.
+	StationName string `json:"stationName,omitempty"`
 }
 
 // DefaultOrigins is what a fresh install trusts: production, plus the dev
@@ -143,6 +164,17 @@ func (c *Config) EnsureToken() (created bool, err error) {
 	}
 	c.Token = tok
 	return true, c.Save()
+}
+
+// AllowOrigin adds an origin to the allowlist if it is not there yet. Used by
+// `agent pair`: the allowlist is persisted, so a new default never reaches an
+// agent installed before it, and pairing is the one step every venue runs.
+func (c *Config) AllowOrigin(origin string) bool {
+	if c.OriginAllowed(origin) {
+		return false
+	}
+	c.AllowedOrigins = append(c.AllowedOrigins, origin)
+	return true
 }
 
 // LogFile is the resolved log path.

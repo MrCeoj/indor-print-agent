@@ -12,6 +12,8 @@
 //	agent start/stop  control an installed service
 //	agent token       print this terminal's token, for pasting into the app
 //	agent status      show where the config lives and what is configured
+//	agent pair        make this agent its venue's print station
+//	agent unpair      stop being a print station
 package main
 
 import (
@@ -31,6 +33,7 @@ import (
 	"github.com/thr1vefitstudio/print-agent/internal/config"
 	"github.com/thr1vefitstudio/print-agent/internal/console"
 	"github.com/thr1vefitstudio/print-agent/internal/httpapi"
+	"github.com/thr1vefitstudio/print-agent/internal/relay"
 	"github.com/thr1vefitstudio/print-agent/internal/service"
 	"github.com/thr1vefitstudio/print-agent/internal/spooler"
 )
@@ -80,6 +83,10 @@ func main() {
 		err = printToken()
 	case "status":
 		err = printStatus()
+	case "pair":
+		err = pair()
+	case "unpair":
+		err = unpair()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -118,15 +125,20 @@ func usage() {
   agent stop        stop the installed service
   agent token       print this terminal's token
   agent status      show the configuration
+  agent pair <server> <code>
+                    make this PC its venue's print station, so tablets
+                    can print here (the code is shown on the venue screen)
+  agent unpair      stop being a print station
 
 `)
 }
 
-// build wires a config, a spooler and a logger into an HTTP server.
-func build() (*httpapi.Server, *config.Config, io.Closer, error) {
+// build wires a config, a spooler and a logger into an HTTP server, and into
+// the relay loop when this agent is a print station.
+func build() (*httpapi.Server, *relay.Relay, *config.Config, io.Closer, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Log to a file and to stdout. The file is what a remote diagnosis reads;
@@ -139,12 +151,20 @@ func build() (*httpapi.Server, *config.Config, io.Closer, error) {
 	}
 	logger := log.New(out, "", log.LstdFlags|log.LUTC)
 
-	return httpapi.New(cfg, spooler.New(), version, logger), cfg, closer, nil
+	// One spooler, serialised, shared by both: a loopback print and a relayed
+	// one must queue behind each other, never interleave.
+	sp := spooler.Serial(spooler.New())
+
+	var rl *relay.Relay
+	if cfg.Relay != nil {
+		rl = relay.New(*cfg.Relay, sp, version, logger)
+	}
+	return httpapi.New(cfg, sp, version, logger), rl, cfg, closer, nil
 }
 
 // serve starts the listener and hands back a shutdown function.
 func serve() (stop func(context.Context) error, addr string, err error) {
-	srv, cfg, closer, err := build()
+	srv, rl, cfg, closer, err := build()
 	if err != nil {
 		return nil, "", err
 	}
@@ -194,8 +214,26 @@ func serve() (stop func(context.Context) error, addr string, err error) {
 	case <-time.After(250 * time.Millisecond):
 	}
 
+	// The relay starts only once the loopback API is up, so a second copy that
+	// failed to bind above never also starts taking the venue's jobs.
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	if rl != nil {
+		go func() {
+			defer close(relayDone)
+			rl.Run(relayCtx)
+		}()
+	} else {
+		close(relayDone)
+	}
+
 	return func(ctx context.Context) error {
+		stopRelay()
 		err := httpSrv.Shutdown(ctx)
+		select {
+		case <-relayDone:
+		case <-ctx.Done():
+		}
 		_ = closer.Close()
 		return err
 	}, srv.Addr(), nil
@@ -307,6 +345,11 @@ func printStatus() error {
 	fmt.Printf("listen         http://127.0.0.1:%d\n", cfg.Port)
 	fmt.Printf("token          %s\n", present(cfg.Token))
 	fmt.Printf("origins        %v\n", cfg.AllowedOrigins)
+	if cfg.Relay != nil {
+		fmt.Printf("station        %q via %s\n", cfg.Relay.StationName, cfg.Relay.ServerURL)
+	} else {
+		fmt.Println("station        not paired (tablets cannot print here)")
+	}
 
 	printers, err := spooler.New().List()
 	if err != nil {
@@ -327,6 +370,74 @@ func printStatus() error {
 		fmt.Printf("printer        %s [%s]%s\n", p.Name, p.Status, def)
 	}
 	return nil
+}
+
+// pair makes this agent its venue's print station.
+//
+// It also adds the server's origin to the allowlist: the list is persisted, so
+// an agent installed before this app existed would otherwise refuse the very
+// pages that now print through it. And it restarts the service, so the
+// station is live when this command returns.
+func pair() error {
+	if len(os.Args) < 4 {
+		return fmt.Errorf("usage: agent pair <server url> <code>")
+	}
+	serverURL, err := relay.ValidateServerURL(os.Args[2])
+	if err != nil {
+		return err
+	}
+	code := strings.Join(os.Args[3:], "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.EnsureToken(); err != nil {
+		return err
+	}
+
+	link, err := relay.Pair(serverURL, code, version)
+	if err != nil {
+		return err
+	}
+	cfg.Relay = &link
+	cfg.AllowOrigin(serverURL)
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+
+	fmt.Printf("Paired as station %q with %s.\n", link.StationName, serverURL)
+	restartIfInstalled()
+	return nil
+}
+
+func unpair() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Relay == nil {
+		fmt.Println("This agent is not a print station.")
+		return nil
+	}
+	cfg.Relay = nil
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Println("No longer a print station. Remove it from the venue screen as well.")
+	restartIfInstalled()
+	return nil
+}
+
+// restartIfInstalled picks up a changed config. Best effort: in LogonTask mode
+// there is no service, and the person is told what to do instead.
+func restartIfInstalled() {
+	_ = service.Stop()
+	if err := service.Start(); err != nil {
+		fmt.Println("Restart the agent (or sign out and back in) for this to take effect.")
+		return
+	}
+	fmt.Println("Restarted the service.")
 }
 
 // inUse recognises a taken port across platforms. Windows raises

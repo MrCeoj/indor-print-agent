@@ -1,5 +1,12 @@
 # Thr1ve Print Agent
 
+Its own repo since 1.1.0, copied with its history from
+`indor-classes/tools/print-agent/`, which still holds a copy.
+
+Two web apps print through it: **indor-classes** (`/caja`, client in
+`src/lib/printing/`) and **indor-analytics**, the club POS (`/pos/caja`, client in
+`modules/printing/`). Both build the bytes; this agent only delivers them.
+
 A single Go binary that lets `/caja` print receipts and open the cash drawer on
 a Windows front desk terminal. It replaces QZ Tray.
 
@@ -22,7 +29,7 @@ Four things about that shape were unreliable in practice:
 
 This agent does none of that. It lists printers and writes bytes. **The whole
 ESC/POS stream — the rasterised ticket, the drawer pulse, the cut — is built in
-the web app** (`src/lib/printing/`), so changing a receipt never means shipping
+the web app** (see above), so changing a receipt never means shipping
 a new binary to a counter.
 
 ## Install
@@ -60,6 +67,55 @@ and will not start. The token is therefore readable by anyone who can log into
 that terminal — acceptable, since it authorizes printing on that machine and the
 person logged into it is the one doing the printing, but it is a genuine step
 down from Service mode and should not be the default.
+
+### LAN printers
+
+A printer on the venue network works the same as a USB one, as long as it is
+installed **in Windows** on the PC: the agent writes to Windows queues and never
+to an IP address. The venue router hands out addresses by DHCP, and nobody can
+pin them, so the queue must not be pinned to one either:
+
+- Add the printer through *Settings → Printers → Add device* so Windows finds it
+  over **WSD**. A WSD port follows the printer when its address changes.
+- If it has to be added by hand, use a *Standard TCP/IP port* with the printer's
+  **hostname** (printed on its self-test page), not its IP.
+- Use the vendor's driver or *Generic / Text Only*. The job goes in RAW either
+  way; the driver only has to accept it.
+
+### Print station (tablets)
+
+A waiter's tablet has no agent, so it cannot reach a printer. One PC per venue
+becomes a **print station**: the agent on it also polls the app for jobs queued
+by tablets and prints them on its own queues. Every connection is outbound
+HTTPS. Nothing on the venue network is opened.
+
+1. On the venue screen in the app, *Estaciones de impresión → Agregar*. It shows
+   an 8-character code, valid for 15 minutes, once.
+2. On the PC, from an elevated PowerShell:
+
+   ```powershell
+   & 'C:\Program Files\Thr1vePrint\thr1ve-print-agent.exe' pair https://<app> <code>
+   ```
+
+   This stores the station credential in `config.json`, adds the app's origin to
+   `allowedOrigins`, and restarts the service.
+3. On a tablet, the printer panel picks *Impresora de la sede* by itself when
+   no agent answers. Pick the station and the printer.
+
+A tablet's job that is not taken within 90 s expires and never prints. One that
+was taken is never handed out again, even if the PC died before printing it. A
+relayed job never opens the drawer.
+
+`agent unpair` stops the relay. *Vincular de nuevo* on the venue screen issues a
+new code and invalidates the old credential at once, which is also the fix for
+a replaced PC.
+
+### Upgrading
+
+Run `install.ps1` from the new release, the same as a first install. It stops
+the service, replaces the exe and re-registers it. `config.json` is left alone,
+so the terminal token pasted in the browser keeps working. Printing pauses for
+a few seconds while it runs.
 
 ## Troubleshooting
 
@@ -144,6 +200,8 @@ await (await fetch('http://127.0.0.1:9101/v1/health')).json();
 | `agent start` / `stop` | Control an installed service.                                          |
 | `agent token`          | Print this terminal's token. `--new` rotates it.                       |
 | `agent status`         | Where the config lives, what is configured, what printers are visible. |
+| `agent pair <url> <code>` | Become the venue's print station. Restarts the service.             |
+| `agent unpair`         | Stop being a print station.                                            |
 
 ## HTTP API
 
@@ -166,7 +224,12 @@ identical from a failed fetch.
 ## Security
 
 - **Loopback bind, not configurable.** The listen address is hardcoded; no
-  config value can put a printer on the LAN.
+  config value can put a printer on the LAN. The print station does not change
+  this: it is an outbound client, not a listener.
+- **The station credential is a server credential.** Unlike the terminal token,
+  `relay.token` lets whoever holds it take that venue's print jobs. It is
+  stored only in `config.json`, sent only to the paired server over HTTPS, and
+  never logged. Only its sha256 is stored on the server.
 - **Origin allowlist**, exact match. A request with no `Origin` — curl, another
   local process, a native app — cannot print. The browser is the only client.
 - **Bearer token**, 32 random bytes, generated at install into
@@ -191,7 +254,7 @@ production origin and run `fetch('http://127.0.0.1:9101/v1/health')`. A prompt
 is fine — it is granted once per origin and persists. A block with no prompt
 means the transport has to change, and the escape hatch is polling (the agent
 subscribing to a server-side job queue), which is why every call in the app goes
-through `src/lib/printing/agent.ts`.
+through the client's `agent.ts` in each app.
 
 ## Developing
 
@@ -204,7 +267,7 @@ go build -o /tmp/thr1ve-agent ./cmd/agent
 /tmp/thr1ve-agent run
 ```
 
-Then print from `/caja` against `pnpm dev`, and turn the captured job back into
+Then print from either app's dev server, and turn the captured job back into
 an image:
 
 ```bash
@@ -230,7 +293,8 @@ sign the exe if that becomes a support cost.
 cmd/agent/main.go             commands, wiring, foreground and service entry
 internal/config               config.json, the token, the origin allowlist
 internal/httpapi              the three routes, CORS/PNA, auth
-internal/spooler              List / WriteRaw
+internal/relay                the print station: long-poll, print, report
+internal/spooler              List / WriteRaw, and Serial (one job at a time)
   spooler_windows.go          winspool.drv syscalls
   spooler_other.go            the dev sink
 internal/service              Windows service registration and lifecycle

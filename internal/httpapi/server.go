@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,11 +34,6 @@ type Server struct {
 	sp      spooler.Spooler
 	version string
 	logger  *log.Logger
-
-	// One printer, one drawer, one job at a time. Two tabs printing at once
-	// would interleave two ESC/POS streams into one queue, and the result is
-	// not two receipts - it is one unreadable one.
-	printMu sync.Mutex
 
 	jobSeq atomic.Uint64
 }
@@ -219,9 +213,9 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.printMu.Lock()
+	// sp is spooler.Serial: jobs from the relay and from other tabs queue
+	// behind this one rather than interleaving with it.
 	err = s.sp.WriteRaw(req.Printer, req.JobName, data)
-	s.printMu.Unlock()
 
 	if err != nil {
 		s.logf("print to %q failed: %v", req.Printer, err)

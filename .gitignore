@@ -1,0 +1,3 @@
+# Build output. Releases are zipped beside install.ps1, not committed.
+*.exe
+thr1ve-print-agent

@@ -6,6 +6,8 @@
 // verified on a Mac with no printer attached.
 package spooler
 
+import "sync"
+
 // Printer is one queue as the OS reports it.
 type Printer struct {
 	Name      string `json:"name"`
@@ -32,3 +34,25 @@ type Spooler interface {
 
 // New returns the platform's spooler.
 func New() Spooler { return newSpooler() }
+
+// Serial wraps a spooler so only one job is written at a time, whoever sent it.
+//
+// One printer, one drawer, one job at a time. Two jobs at once - a cashier at
+// this PC and a waiter's tablet through the relay - would interleave two
+// ESC/POS streams into one queue, and the result is not two receipts, it is one
+// unreadable one. The lock lives here, below both callers, so neither can
+// forget it.
+func Serial(sp Spooler) Spooler { return &serial{sp: sp} }
+
+type serial struct {
+	mu sync.Mutex
+	sp Spooler
+}
+
+func (s *serial) List() ([]Printer, error) { return s.sp.List() }
+
+func (s *serial) WriteRaw(printer, jobName string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sp.WriteRaw(printer, jobName, data)
+}

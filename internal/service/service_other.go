@@ -18,3 +18,5 @@ func Install() error   { return errNotWindows }
 func Uninstall() error { return errNotWindows }
 func Start() error     { return errNotWindows }
 func Stop() error      { return errNotWindows }
+
+func RegisterLogonTask() error { return errNotWindows }

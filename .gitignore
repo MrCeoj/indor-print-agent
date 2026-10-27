@@ -1,4 +1,7 @@
-# Build output. Releases are zipped beside install.ps1, not committed.
+# Build output. Releases are built by CI, not committed.
+*.syso
+*.msi
+*.wixpdb
 *.exe
 thr1ve-print-agent
 .DS_Store

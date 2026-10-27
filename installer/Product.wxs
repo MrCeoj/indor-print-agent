@@ -1,0 +1,179 @@
+<!--
+  The Thr1ve Print Agent MSI. Built by .github/workflows/release.yml with WiX 5:
+
+    wix build installer/Product.wxs -arch x64 -d Version=1.2.0 -d BinDir=dist -o agent.msi
+
+  Two modes, chosen with the MODE property and remembered across upgrades:
+
+    Service   (default) Runs under LocalSystem, starts at boot, restarts on
+              failure, and keeps running when nobody is logged in. It runs in
+              session 0, which cannot see printers installed for a single user
+              account - only machine-wide ones. USB receipt printers normally
+              install machine-wide, so this is almost always the right choice.
+
+    LogonTask Runs in the cashier's own session at logon, so it sees exactly
+              the printers the cashier sees. Use this when `agent status`
+              reports no printers on a terminal where printing plainly works.
+              It also has to let ordinary users read the token.
+
+      msiexec /i thr1ve-print-agent-windows-x64.msi MODE=LogonTask
+
+  Everything install.ps1 used to do is declared here instead of scripted:
+  service registration, recovery policy and the data folder ACL are native
+  Windows Installer tables. The only custom actions left are the scheduled task,
+  which Windows Installer has no table for, and two best-effort cleanups.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Thr1ve Print Agent"
+    Manufacturer="Indor Club"
+    Version="$(var.Version)"
+    UpgradeCode="00D33B6E-5691-45CA-A2DA-82C7D9B59149"
+    Scope="perMachine"
+    Compressed="yes">
+
+    <SummaryInformation Description="Prints receipts and opens the cash drawer for the Thr1ve front desk." />
+
+    <!-- Every install replaces whatever is there. config.json is not one of the
+         MSI's files, so the token pasted in the browser survives an upgrade. -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer Thr1ve Print Agent is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- MODE: a value on the command line wins, then the one the last install
+         saved, then Service. Without the middle step a plain upgrade of a
+         LogonTask terminal would quietly turn it back into a service. -->
+    <Property Id="SAVEDMODE" Secure="yes">
+      <RegistrySearch Id="SavedMode" Root="HKLM" Key="Software\Indor Club\Thr1ve Print Agent"
+        Name="Mode" Type="raw" />
+    </Property>
+    <SetProperty Id="MODE" Action="SetModeFromRegistry" Value="[SAVEDMODE]"
+      After="AppSearch" Sequence="both" Condition="NOT MODE AND SAVEDMODE" />
+    <SetProperty Id="MODE" Action="SetModeDefault" Value="Service"
+      After="SetModeFromRegistry" Sequence="both" Condition="NOT MODE" />
+    <Property Id="MODE" Secure="yes" />
+
+    <Launch Condition="Installed OR MODE=&quot;Service&quot; OR MODE=&quot;LogonTask&quot;"
+      Message="MODE must be Service or LogonTask." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Thr1vePrint" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="Thr1vePrint" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Thr1ve Print Agent">
+
+      <Component Id="Settings" Directory="INSTALLFOLDER" Guid="A4313BC7-6DA3-40B2-8FB8-DD57405FC4E2">
+        <RegistryValue Root="HKLM" Key="Software\Indor Club\Thr1ve Print Agent"
+          Name="Mode" Type="string" Value="[MODE]" KeyPath="yes" />
+        <!-- On PATH, so `thr1ve-print-agent token` works from any elevated prompt. -->
+        <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last"
+          Action="set" System="yes" Permanent="no" />
+      </Component>
+
+      <!-- The binary is in two components because Windows Installer takes a
+           service's binary from the component that declares it, and only one
+           mode wants a service. The conditions are mutually exclusive, so
+           exactly one copy is ever installed. -->
+      <Component Id="ServiceExe" Directory="INSTALLFOLDER" Guid="199F50E3-2DEA-4833-ACC2-C9C5613F3D12"
+        Condition="MODE&lt;&gt;&quot;LogonTask&quot;">
+        <File Id="ServiceExe" Name="thr1ve-print-agent.exe"
+          Source="$(var.BinDir)\thr1ve-print-agent.exe" KeyPath="yes" />
+
+        <ServiceInstall
+          Name="Thr1vePrint"
+          DisplayName="Thr1ve Print Agent"
+          Description="Prints receipts and opens the cash drawer for the Thr1ve front desk."
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Arguments="run"
+          Vital="yes">
+          <!-- Delayed: the spooler service and the USB stack want to be up
+               first, and nothing is waiting on this agent at second zero. -->
+          <ServiceConfig DelayedAutoStart="yes" OnInstall="yes" OnReinstall="yes" />
+          <!-- Restart forever, backing off. A print agent that stays down after
+               one crash is a counter that cannot take money. -->
+          <ServiceConfigFailureActions OnInstall="yes" OnReinstall="yes" ResetPeriod="86400">
+            <Failure Action="restartService" Delay="5000" />
+            <Failure Action="restartService" Delay="10000" />
+            <Failure Action="restartService" Delay="60000" />
+          </ServiceConfigFailureActions>
+        </ServiceInstall>
+
+        <!-- Remove on install as well as uninstall: a terminal set up by the
+             old install.ps1 already has a Thr1vePrint service the MSI does not
+             own, and creating one over it fails. -->
+        <ServiceControl Id="Service" Name="Thr1vePrint"
+          Start="install" Stop="both" Remove="both" Wait="yes" />
+
+        <!-- Event log source, so a service that fails to start has somewhere
+             to say why. Same values `agent install` registers. -->
+        <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\Thr1vePrint">
+          <RegistryValue Name="EventMessageFile" Type="expandable"
+            Value="%SystemRoot%\System32\EventCreate.exe" />
+          <RegistryValue Name="TypesSupported" Type="integer" Value="7" />
+        </RegistryKey>
+      </Component>
+
+      <Component Id="TaskExe" Directory="INSTALLFOLDER" Guid="5DF07CC3-4FF5-46F3-8C3E-B80CEB3CF886"
+        Condition="MODE=&quot;LogonTask&quot;">
+        <File Id="TaskExe" Name="thr1ve-print-agent.exe"
+          Source="$(var.BinDir)\thr1ve-print-agent.exe" KeyPath="yes" />
+        <!-- A service left by install.ps1 would fight the task for the port. -->
+        <ServiceControl Id="LegacyService" Name="Thr1vePrint"
+          Stop="install" Remove="install" Wait="yes" />
+      </Component>
+
+      <!-- The data folder holds the token, so it is locked to the accounts that
+           need it: protected (no inherited entries), full control for SYSTEM
+           and Administrators, by SID, so it works on a Spanish Windows too.
+           LogonTask mode runs as the cashier and adds read for Users. -->
+      <Component Id="DataServiceAcl" Directory="DATAFOLDER" Guid="17C99F5E-6FE4-4085-9218-3F8103400AE1"
+        Condition="MODE&lt;&gt;&quot;LogonTask&quot;">
+        <CreateFolder>
+          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+        </CreateFolder>
+      </Component>
+
+      <Component Id="DataTaskAcl" Directory="DATAFOLDER" Guid="0A956462-5598-4F84-A29C-BBB4B649D203"
+        Condition="MODE=&quot;LogonTask&quot;">
+        <CreateFolder>
+          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)" />
+        </CreateFolder>
+      </Component>
+    </Feature>
+
+    <!-- The scheduled task. All deferred and run as LocalSystem. -->
+
+    <!-- A LogonTask agent runs in a user session and holds the exe open. The
+         SESSION filter keeps this away from the service in session 0, which
+         ServiceControl stops properly. Nothing running is the normal case. -->
+    <CustomAction Id="StopSessionAgents" Directory="TARGETDIR"
+      ExeCommand="&quot;[System64Folder]taskkill.exe&quot; /F /IM thr1ve-print-agent.exe /FI &quot;SESSION ne 0&quot;"
+      Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Always cleared: re-registered below in LogonTask mode, and stale in
+         every other case. Not existing is the normal case. -->
+    <CustomAction Id="DeleteLogonTask" Directory="TARGETDIR"
+      ExeCommand="&quot;[System64Folder]schtasks.exe&quot; /Delete /TN Thr1vePrintAgent /F"
+      Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Registers the task and mints the token, which the cashier's own
+         account could not write. -->
+    <CustomAction Id="RegisterLogonTask" Directory="INSTALLFOLDER"
+      ExeCommand="&quot;[INSTALLFOLDER]thr1ve-print-agent.exe&quot; logontask"
+      Execute="deferred" Impersonate="no" Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopSessionAgents" After="InstallInitialize" />
+      <Custom Action="DeleteLogonTask" After="StopSessionAgents" />
+      <Custom Action="RegisterLogonTask" After="InstallFiles"
+        Condition="MODE=&quot;LogonTask&quot; AND NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

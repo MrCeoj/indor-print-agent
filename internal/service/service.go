@@ -1,9 +1,9 @@
 // Package service is the Windows service plumbing, isolated so that main can
 // read the same on every platform.
 //
-// The binary is both the service and its own installer. One file to copy to a
-// counter, one command to register it, and no separate installer to keep in
-// step with it.
+// Releases install through the MSI, which registers the service itself. The
+// binary can still register itself (`agent install`) for a manual setup, and
+// LogonTask mode has no MSI equivalent, so the MSI calls RegisterLogonTask.
 package service
 
 import "context"

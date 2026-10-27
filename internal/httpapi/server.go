@@ -126,7 +126,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Token == "" {
 			writeErr(w, http.StatusServiceUnavailable, "no_token",
-				"the agent has no token configured; re-run install.ps1")
+				"the agent has no token configured; run `agent token` as administrator")
 			return
 		}
 		presented := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))

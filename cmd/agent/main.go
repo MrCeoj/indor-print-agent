@@ -14,6 +14,7 @@
 //	agent status      show where the config lives and what is configured
 //	agent pair        make this agent its venue's print station
 //	agent unpair      stop being a print station
+//	agent logontask   run at each user's logon instead of as a service
 package main
 
 import (
@@ -87,6 +88,8 @@ func main() {
 		err = pair()
 	case "unpair":
 		err = unpair()
+	case "logontask":
+		err = installLogonTask()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -129,6 +132,8 @@ func usage() {
                     make this PC its venue's print station, so tablets
                     can print here (the code is shown on the venue screen)
   agent unpair      stop being a print station
+  agent logontask   run at each user's logon instead of as a service
+                    (the MSI does this for MODE=LogonTask)
 
 `)
 }
@@ -168,10 +173,14 @@ func serve() (stop func(context.Context) error, addr string, err error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if cfg.Token == "" {
-		// Not fatal: /v1/health still answers, which is what turns "no token"
-		// into a message in the app rather than a terminal that looks dead.
-		log.Printf("warning: no token configured; run `agent install` or `agent token --new`")
+	// The MSI does not mint the token, so a fresh install gets it here, on the
+	// service's first start. Failing to save it is not fatal: /v1/health still
+	// answers, which is what turns "no token" into a message in the app rather
+	// than a terminal that looks dead.
+	if created, err := cfg.EnsureToken(); err != nil {
+		log.Printf("warning: no token configured and none could be saved: %v", err)
+	} else if created {
+		log.Printf("generated a terminal token; print it with `agent token`")
 	}
 
 	httpSrv := &http.Server{
@@ -301,6 +310,23 @@ func install() error {
 	}
 	fmt.Printf("\n    %s\n\n", cfg.Token)
 	fmt.Printf("It is also stored in %s\n", config.Path())
+	return nil
+}
+
+// installLogonTask is LogonTask mode's install. The task runs as the cashier,
+// who can only read the config, so the token is minted here, while elevated.
+func installLogonTask() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.EnsureToken(); err != nil {
+		return err
+	}
+	if err := service.RegisterLogonTask(); err != nil {
+		return err
+	}
+	fmt.Println("Registered the logon task. Print the token with `agent token`.")
 	return nil
 }
 

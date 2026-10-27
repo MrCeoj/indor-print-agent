@@ -1,0 +1,49 @@
+{
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "",
+          "version": ""
+        },
+        "description": "Thr1ve Print Agent",
+        "minimum-os": "win7",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "disable-theming": false,
+        "disable-window-filtering": false,
+        "high-resolution-scrolling-aware": false,
+        "ultra-high-resolution-scrolling-aware": false,
+        "long-path-aware": false,
+        "printer-driver-isolation": false,
+        "gdi-scaling": false,
+        "segment-heap": false,
+        "use-common-controls-v6": false
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Indor Club",
+            "FileDescription": "Thr1ve Print Agent",
+            "FileVersion": "",
+            "InternalName": "thr1ve-print-agent",
+            "LegalCopyright": "© Indor Club",
+            "OriginalFilename": "thr1ve-print-agent.exe",
+            "ProductName": "Thr1ve Print Agent",
+            "ProductVersion": ""
+          }
+        }
+      }
+    }
+  }
+}

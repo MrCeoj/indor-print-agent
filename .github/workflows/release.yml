@@ -1,0 +1,113 @@
+# Builds the Windows agent and its MSI and publishes them as a GitHub release.
+#
+# Triggered by pushing a version tag:
+#
+#   git tag v1.2.0
+#   git push origin v1.2.0
+#
+# The tag is the version: it is stamped into the binary (`agent status` prints
+# it), into the exe's file properties and the MSI, and names the release.
+# Nothing else has to be edited to cut one.
+#
+# It can also be run by hand from the Actions tab (Run workflow), which builds
+# everything and attaches it to the run as an artifact without publishing a
+# release. That is the way to try an installer change before tagging.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  # Creating a release and uploading its files is a write to the repo.
+  contents: write
+
+env:
+  # Pinned. WiX 6 and later need a paid maintenance-fee EULA accepted on the
+  # command line; 5 is free and does everything this installer needs.
+  WIX_VERSION: '5.0.2'
+  GO_WINRES_VERSION: 'v0.3.3'
+
+jobs:
+  release:
+    # Windows, because building an MSI needs Windows Installer itself.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # v1.2.0 -> 1.2.0 for the binary. Windows Installer only takes a plain
+      # numeric version, so v1.2.0-rc1 becomes 1.2.0 for the MSI. A manual run
+      # is not on a tag and builds as 0.0.0.
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "MSI_VERSION=${version%%-*}" >> "$GITHUB_ENV"
+
+      # Publisher, product name and version in the exe's file properties. An
+      # exe with none of these is one of the things antivirus heuristics flag.
+      - name: Embed version resource
+        run: |
+          go run "github.com/tc-hib/go-winres@${GO_WINRES_VERSION}" make \
+            --in winres/winres.json --out cmd/agent/rsrc --arch amd64 \
+            --product-version "${VERSION}" --file-version "${MSI_VERSION}"
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go vet ./...
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o dist/thr1ve-print-agent.exe ./cmd/agent
+
+      # Signing goes here, once there is a certificate: sign the exe before the
+      # MSI packs it, and the MSI after it is built.
+
+      # The asset name carries no version on purpose: it keeps
+      # .../releases/latest/download/thr1ve-print-agent-windows-x64.msi
+      # pointing at the newest release forever.
+      - name: Build MSI
+        run: |
+          dotnet tool install --global wix --version "${WIX_VERSION}"
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          wix build installer/Product.wxs -arch x64 \
+            -d Version="${MSI_VERSION}" -d BinDir=dist \
+            -o dist/thr1ve-print-agent-windows-x64.msi
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum thr1ve-print-agent-windows-x64.msi thr1ve-print-agent.exe > SHA256SUMS.txt
+
+      - name: Upload build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thr1ve-print-agent
+          path: dist/
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/thr1ve-print-agent-windows-x64.msi \
+            dist/thr1ve-print-agent.exe \
+            dist/SHA256SUMS.txt

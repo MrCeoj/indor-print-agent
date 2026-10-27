@@ -34,15 +34,25 @@ a new binary to a counter.
 
 ## Install
 
-Unzip the release on the terminal and, from an elevated PowerShell:
+Download the MSI from the latest release and run it on the terminal:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+```
+https://github.com/MrCeoj/indor-print-agent/releases/latest/download/thr1ve-print-agent-windows-x64.msi
 ```
 
-It copies the binary to `C:\Program Files\Thr1vePrint`, registers the service,
-starts it, and prints a token. Paste that token into the printer panel at
-`/caja` on that terminal, once.
+It installs to `C:\Program Files\Thr1vePrint`, registers and starts the
+service, and puts the binary on `PATH`. The service mints the terminal token on
+its first start. Read it from an elevated prompt and paste it into the printer
+panel at `/caja` on that terminal, once:
+
+```powershell
+thr1ve-print-agent token
+```
+
+Unattended, e.g. over remote management: `msiexec /i thr1ve-print-agent-windows-x64.msi /qn`.
+
+Terminals set up with the old `install.ps1` need nothing special: the MSI takes
+over the existing service, and `config.json` (with its token) is left alone.
 
 ### If `agent status` reports no printers
 
@@ -51,17 +61,21 @@ printer queues but not ones installed under a single user account. USB receipt
 printers normally install machine-wide, so this is rare — but when it happens,
 the cashier can print from Word and the agent sees nothing.
 
-Reinstall in the other mode:
+Reinstall in the other mode, from an elevated prompt:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1 -Mode LogonTask
+msiexec /x thr1ve-print-agent-windows-x64.msi
+msiexec /i thr1ve-print-agent-windows-x64.msi MODE=LogonTask
 ```
+
+The mode is remembered, so later upgrades keep it. Switching back is the same
+two commands with `MODE=Service`.
 
 That runs the same binary in the cashier's own session at logon. It needs the
 terminal to log in automatically, which a till normally does.
 
 One consequence worth knowing: in this mode the agent runs as the cashier, so
-the installer also grants the **Users** group read access to
+the MSI also grants the **Users** group read access to
 `C:\ProgramData\Thr1vePrint`. Without it the agent cannot read its own config
 and will not start. The token is therefore readable by anyone who can log into
 that terminal — acceptable, since it authorizes printing on that machine and the
@@ -112,10 +126,16 @@ a replaced PC.
 
 ### Upgrading
 
-Run `install.ps1` from the new release, the same as a first install. It stops
-the service, replaces the exe and re-registers it. `config.json` is left alone,
-so the terminal token pasted in the browser keeps working. Printing pauses for
-a few seconds while it runs.
+Run the new release's MSI, the same as a first install. It replaces the old
+version and restarts the service. `config.json` is not one of its files, so the
+terminal token pasted in the browser keeps working. Printing pauses for a few
+seconds while it runs.
+
+### Uninstalling
+
+*Settings → Apps → Thr1ve Print Agent → Uninstall*, or `msiexec /x` on the MSI.
+`C:\ProgramData\Thr1vePrint` stays behind with the token and log; delete it by
+hand to start from nothing.
 
 ## Troubleshooting
 
@@ -156,28 +176,17 @@ not map, but inheritance had already been stripped, leaving a folder readable by
 nobody. Recover by deleting the folder and reinstalling:
 
 ```powershell
-sc stop Thr1vePrint
+msiexec /x thr1ve-print-agent-windows-x64.msi
 Remove-Item -Recurse -Force C:\ProgramData\Thr1vePrint
-.\install.ps1
+msiexec /i thr1ve-print-agent-windows-x64.msi
 ```
 
 That mints a **new token**, so paste the new one into `/caja`.
 
-### install.ps1 stops at "El sistema no puede encontrar el archivo especificado"
-
-Fixed in the current script. Windows PowerShell turns **any** stderr output from
-a native command into a terminating error when `$ErrorActionPreference` is
-`Stop`, and `2>$null` does not reliably suppress it. `schtasks /End` on a
-terminal that has no such task — the normal case on a first install — reports
-exactly that on stderr, so the installer died at its own cleanup step before
-copying anything. The script now uses `Get-ScheduledTask` / `Get-Service`
-cmdlets for those checks, and routes the two remaining native programs through
-a wrapper that merges stderr and judges the exit code instead.
-
 ### `agent status` lists no printers
 
 See "If `agent status` reports no printers" under Install — that is the session 0
-case, and `-Mode LogonTask` is the answer.
+case, and `MODE=LogonTask` is the answer.
 
 ### /caja says "Sin agente en esta terminal" but the agent is running
 
@@ -202,6 +211,7 @@ await (await fetch('http://127.0.0.1:9101/v1/health')).json();
 | `agent status`         | Where the config lives, what is configured, what printers are visible. |
 | `agent pair <url> <code>` | Become the venue's print station. Restarts the service.             |
 | `agent unpair`         | Stop being a print station.                                            |
+| `agent logontask`      | Run at each user's logon instead of as a service. The MSI's `MODE=LogonTask`. |
 
 ## HTTP API
 
@@ -284,8 +294,27 @@ GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=1.0.0" \
   -o thr1ve-print-agent.exe ./cmd/agent
 ```
 
-Zip that beside `install.ps1`. Unsigned binaries trip SmartScreen on first run;
-sign the exe if that becomes a support cost.
+That is enough to try a build by hand. Releases come from CI.
+
+### Releasing
+
+`.github/workflows/release.yml` builds the exe (with publisher and version in
+its file properties, from `winres/winres.json`), packs it into the MSI
+(`installer/Product.wxs`, WiX 5), and publishes both as a GitHub release.
+Building an MSI needs Windows, so it runs on a Windows runner. To release, tag
+and push:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+To try an installer change without releasing, run the workflow by hand from the
+Actions tab (*Release → Run workflow*). The MSI is attached to that run as an
+artifact instead.
+
+Nothing is code-signed yet. Antivirus and SmartScreen treat unsigned
+installers with suspicion. The workflow marks where signing goes.
 
 ## Layout
 
@@ -297,7 +326,9 @@ internal/relay                the print station: long-poll, print, report
 internal/spooler              List / WriteRaw, and Serial (one job at a time)
   spooler_windows.go          winspool.drv syscalls
   spooler_other.go            the dev sink
-internal/service              Windows service registration and lifecycle
+internal/service              Windows service and logon task registration
+installer/Product.wxs         the MSI (WiX 5)
+winres/winres.json            publisher and version for the exe's properties
+.github/workflows/release.yml build, package, publish
 decode-job.mjs                a captured job -> PNG
-install.ps1                   terminal setup
 ```

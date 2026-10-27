@@ -135,7 +135,7 @@ func Load() (*Config, error) {
 }
 
 // Save writes config.json, creating the directory if needed. The file is 0600:
-// on Windows the ACL is applied by install.ps1, but on a dev Mac this mode is
+// on Windows the ACL is applied by the MSI, but on a dev Mac this mode is
 // the only thing keeping the token out of another account's reach.
 func (c *Config) Save() error {
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
